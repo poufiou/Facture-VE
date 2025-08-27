@@ -5,25 +5,14 @@ import re
 from datetime import datetime, timedelta
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from PyPDF2 import PdfMerger
 import tempfile
 import os
 
 # === Paramètres fixes ===
-FACTURE_EMETTEUR = '''<b>Émetteur :</b><br/>
-Wesley MARSTON<br/>
-5 clairière des vernedes<br/>
-83480 Puget sur Argens'''
-
-FACTURE_CLIENT = '''<b>Facture à :</b><br/>
-ALKERN France<br/>
-Rue André Bigotte<br/>
-Z.I. Parc de la motte au bois<br/>
-62440 Harnes'''
-
-IMMATRICULATION = "Scenic HD-803-PZ"
+IMMATRICULATION = "HD-803-PZ"
 
 # === Fonctions utilitaires ===
 def normalize_txt(x: str) -> str:
@@ -61,7 +50,6 @@ def find_column(cols, *keywords):
     return None
 
 def parse_temps_actif(s: str) -> int:
-    # Parse "6 hr 26 min 30 sec" en secondes
     if pd.isna(s):
         return 0
     s = str(s).lower()
@@ -126,57 +114,108 @@ def generate_facture(df, annexe_file, mois_selection, vehicule_value, cols):
     for _, row in dfv.iterrows():
         kwh_hc, kwh_hp, cost = compute_cost(row[col_start], row["active_sec"], row["kWh"])
         sessions.append({
-            "date": row[col_start].strftime("%d/%m/%Y") if not pd.isna(row[col_start]) else "",
-            "debut": row[col_start].strftime("%Hh%M") if not pd.isna(row[col_start]) else "",
+            "debut": row[col_start].strftime("%d/%m/%Y %Hh%M") if not pd.isna(row[col_start]) else "",
+            "fin": row[col_end] if not pd.isna(row[col_end]) else "",
+            "duree": str(timedelta(seconds=row["active_sec"])),
             "kWh_total": row["kWh"],
             "kWh_HC": kwh_hc,
             "kWh_HP": kwh_hp,
-            "tarif_HC": get_tarifs(row[col_start])["HC"] if not pd.isna(row[col_start]) else get_tarifs(datetime.now())["HC"],
-            "tarif_HP": get_tarifs(row[col_start])["HP"] if not pd.isna(row[col_start]) else get_tarifs(datetime.now())["HP"],
+            "tarif_HC": get_tarifs(row[col_start])["HC"],
+            "tarif_HP": get_tarifs(row[col_start])["HP"],
             "cout": cost
         })
         total_HT += cost
     total_kWh = sum(s["kWh_total"] for s in sessions)
     tva, total_TTC = total_HT * 0.20, total_HT * 1.20
+
+    # === Estimation CO2 évité ===
+    km_estimes = total_kWh / 0.165
+    co2_diesel = km_estimes * 120 / 1000
+    co2_ev = km_estimes * 4.5 / 1000
+    gain_co2 = co2_diesel - co2_ev
+    arbres_eq = int(round(gain_co2 / 25))
+
+    # === Génération PDF ===
     tmpdir = tempfile.mkdtemp()
-    facture_file = os.path.join(tmpdir, f"facture_{mois_selection}.pdf")
+    facture_file = os.path.join(tmpdir, f"facture_{IMMATRICULATION}_{mois_selection}.pdf")
     doc = SimpleDocTemplate(facture_file, pagesize=A4)
     styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("Title", parent=styles["Title"], textColor=colors.HexColor("#8DC63F"), fontSize=18, alignment=1)
+    normal_style = ParagraphStyle("Normal", parent=styles["Normal"], textColor=colors.HexColor("#4D4D4D"), fontSize=10)
+    header_style = ParagraphStyle("Header", parent=styles["Heading2"], textColor=colors.HexColor("#8DC63F"), fontSize=11, spaceAfter=6)
+
     elements = []
-    elements.append(Paragraph("<b>FACTURE DE RECHARGE VEHICULE ELECTRIQUE</b>", styles["Title"]))
-    elements.append(Spacer(1, 12))
-    elements.append(Paragraph(FACTURE_EMETTEUR, styles["Normal"]))
-    elements.append(Spacer(1, 12))
-    elements.append(Paragraph(FACTURE_CLIENT, styles["Normal"]))
-    elements.append(Spacer(1, 24))
-    elements.append(Paragraph(f"<b>Facture n°:</b> {mois_selection}-{vehicule_value}<br/>"
-                              f"<b>Date :</b> {datetime.now().strftime('%d/%m/%Y')}<br/>"
-                              f"<b>Période :</b> {mois_selection}<br/>"
-                              f"<b>Véhicule :</b> {IMMATRICULATION}", styles["Normal"]))
-    elements.append(Spacer(1, 24))
-    table_data = [["Date", "Début", "kWh total", "kWh HC", "kWh HP", "Tarif HC", "Tarif HP", "Montant (€)"]]
+    elements.append(Paragraph("FACTURE DE RECHARGE VEHICULE ELECTRIQUE", title_style))
+    elements.append(Spacer(1, 18))
+
+    table_info = Table([[
+        "<b>Émetteur :</b><br/>Wesley MARSTON<br/>5 clairière des vernedes<br/>83480 Puget sur Argens",
+        "<b>Facture à :</b><br/>ALKERN France<br/>Rue André Bigotte<br/>Z.I. Parc de la motte au bois<br/>62440 Harnes"
+    ]], colWidths=[250, 250])
+    table_info.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")]))
+    elements.append(table_info)
+    elements.append(Spacer(1, 18))
+
+    infos = [[f"<b>Facture n°:</b> {mois_selection}-{IMMATRICULATION}",
+              f"<b>Date :</b> {datetime.now().strftime('%d/%m/%Y')}",
+              f"<b>Période :</b> {mois_selection}",
+              f"<b>Véhicule :</b> Scenic {IMMATRICULATION}"]]
+    table_infos = Table(infos, colWidths=[120, 100, 150, 150])
+    table_infos.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#f2f2f2")),
+                                     ("TEXTCOLOR", (0,0), (-1,-1), colors.HexColor("#4D4D4D")),
+                                     ("GRID", (0,0), (-1,-1), 0.5, colors.black)]))
+    elements.append(table_infos)
+    elements.append(Spacer(1, 18))
+
+    table_data = [["Début", "Fin", "Durée", "kWh total", "kWh HC", "kWh HP", "Tarif HC", "Tarif HP", "Montant (€)"]]
     for s in sessions:
-        table_data.append([s["date"], s["debut"], f"{s['kWh_total']:.2f}",
-                           f"{s['kWh_HC']:.2f}", f"{s['kWh_HP']:.2f}",
-                           f"{s['tarif_HC']:.4f}", f"{s['tarif_HP']:.4f}", f"{s['cout']:.2f}"])
-    table = Table(table_data, repeatRows=1)
-    table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
-                               ("GRID", (0,0), (-1,-1), 0.5, colors.black)]))
+        table_data.append([s["debut"], s["fin"], s["duree"], f"{s['kWh_total']:.2f}", f"{s['kWh_HC']:.2f}",
+                           f"{s['kWh_HP']:.2f}", f"{s['tarif_HC']:.4f}", f"{s['tarif_HP']:.4f}", f"{s['cout']:.2f}"])
+    table = Table(table_data, repeatRows=1, colWidths=[75,75,55,55,55,55,55,55,65])
+    table_style = TableStyle([("BACKGROUND", (0,0), (-1,0), colors.HexColor("#8DC63F")),
+                              ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+                              ("ALIGN", (3,1), (-1,-1), "RIGHT"),
+                              ("GRID", (0,0), (-1,-1), 0.5, colors.black)])
+    for i in range(1, len(table_data)):
+        if i % 2 == 0:
+            table_style.add("BACKGROUND", (0,i), (-1,i), colors.HexColor("#f2f2f2"))
+    table.setStyle(table_style)
     elements.append(table)
-    elements.append(Spacer(1, 24))
+    elements.append(Spacer(1, 18))
+
     recap = [["Total énergie consommée", f"{total_kWh:.2f} kWh"],
              ["Total HT", f"{total_HT:.2f} €"],
              ["TVA (20%)", f"{tva:.2f} €"],
              ["Total TTC", f"{total_TTC:.2f} €"]]
     recap_table = Table(recap, colWidths=[220, 120])
-    recap_table.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.5, colors.black)]))
+    recap_table.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.5, colors.black),
+                                     ("BACKGROUND", (0,-1), (-1,-1), colors.HexColor("#fff2cc")),
+                                     ("TEXTCOLOR", (0,-1), (-1,-1), colors.HexColor("#b30000")),
+                                     ("FONTNAME", (0,-1), (-1,-1), "Helvetica-Bold")]))
     elements.append(recap_table)
-    elements.append(Spacer(1, 24))
-    mentions = '''Facture générée automatiquement à partir du compteur certifié MID<br/>
-<b>Enphase IQ-EVSE-EU-3032</b> - Conforme aux directives MID, LVD, EMC, RED, RoHS'''
-    elements.append(Paragraph(mentions, styles["Normal"]))
+    elements.append(Spacer(1, 18))
+
+    elements.append(Paragraph("Conditions tarifaires", header_style))
+    elements.append(Paragraph("Heures creuses : 00h06 - 06h06 et 15h06 - 17h06<br/>"
+                              "Tarifs appliqués :<br/>"
+                              "Avant 01/08/2025 → HC : 0,1696 €/kWh | HP : 0,2146 €/kWh<br/>"
+                              "À partir du 01/08/2025 → HC : 0,1635 €/kWh | HP : 0,2081 €/kWh", normal_style))
+    elements.append(Spacer(1, 18))
+
+    elements.append(Paragraph("Chargeur", header_style))
+    elements.append(Paragraph("Enphase IQ-EVSE-EU-3032<br/>"
+                              "Numéro de série : 202451008197<br/>"
+                              "Conforme aux directives MID, LVD, EMC, RED, RoHS", normal_style))
+    elements.append(Spacer(1, 18))
+
+    elements.append(Paragraph("🌍 Impact CO₂ évité", header_style))
+    elements.append(Paragraph(f"Distance estimée parcourue : {km_estimes:,.0f} km<br/>"
+                              f"CO₂ évité : {gain_co2:,.0f} kg", normal_style))
+    elements.append(Paragraph("🌳" * arbres_eq + f" ({arbres_eq} arbres équivalents)", normal_style))
+
     doc.build(elements)
-    final_pdf = os.path.join(tmpdir, f"facture_complete_{mois_selection}.pdf")
+
+    final_pdf = os.path.join(tmpdir, f"facture_complete_{IMMATRICULATION}_{mois_selection}.pdf")
     merger = PdfMerger()
     merger.append(facture_file)
     if annexe_file is not None:
