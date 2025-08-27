@@ -164,8 +164,8 @@ uploaded_annexe = st.file_uploader("Déposez la Déclaration de Conformité Enph
 mois_selection = st.text_input("Mois de consommation (format YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
 
 if uploaded_csv is not None:
-    # Lecture CSV avec séparateur français
-    df = pd.read_csv(uploaded_csv, sep=";")
+    # Lecture CSV avec séparateur virgule et guillemets
+    df = pd.read_csv(uploaded_csv, sep=",", quotechar='"')
 
     # Affichage colonnes détectées
     st.subheader("🗂️ Colonnes détectées dans le fichier CSV")
