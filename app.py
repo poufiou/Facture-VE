@@ -12,16 +12,16 @@ import tempfile
 import os
 
 # === Paramètres fixes ===
-FACTURE_EMETTEUR = \"\"\"<b>Émetteur :</b><br/>
+FACTURE_EMETTEUR = '''<b>Émetteur :</b><br/>
 Wesley MARSTON<br/>
 5 clairière des vernedes<br/>
-83480 Puget sur Argens\"\"\"
+83480 Puget sur Argens'''
 
-FACTURE_CLIENT = \"\"\"<b>Facture à :</b><br/>
+FACTURE_CLIENT = '''<b>Facture à :</b><br/>
 ALKERN France<br/>
 Rue André Bigotte<br/>
 Z.I. Parc de la motte au bois<br/>
-62440 Harnes\"\"\"
+62440 Harnes'''
 
 IMMATRICULATION = "Scenic HD-803-PZ"
 
@@ -66,9 +66,9 @@ def parse_temps_actif(s: str) -> int:
         return 0
     s = str(s).lower()
     total = 0
-    hr = re.search(r"(\\d+)\\s*hr", s)
-    mn = re.search(r"(\\d+)\\s*min", s)
-    sc = re.search(r"(\\d+)\\s*sec", s)
+    hr = re.search(r"(\d+)\s*hr", s)
+    mn = re.search(r"(\d+)\s*min", s)
+    sc = re.search(r"(\d+)\s*sec", s)
     if hr:
         total += int(hr.group(1)) * 3600
     if mn:
@@ -172,8 +172,8 @@ def generate_facture(df, annexe_file, mois_selection, vehicule_value, cols):
     recap_table.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.5, colors.black)]))
     elements.append(recap_table)
     elements.append(Spacer(1, 24))
-    mentions = \"\"\"Facture générée automatiquement à partir du compteur certifié MID<br/>
-<b>Enphase IQ-EVSE-EU-3032</b> – Conforme aux directives MID, LVD, EMC, RED, RoHS\"\"\"
+    mentions = '''Facture générée automatiquement à partir du compteur certifié MID<br/>
+<b>Enphase IQ-EVSE-EU-3032</b> - Conforme aux directives MID, LVD, EMC, RED, RoHS'''
     elements.append(Paragraph(mentions, styles["Normal"]))
     doc.build(elements)
     final_pdf = os.path.join(tmpdir, f"facture_complete_{mois_selection}.pdf")
