@@ -164,11 +164,17 @@ uploaded_annexe = st.file_uploader("Déposez la Déclaration de Conformité Enph
 mois_selection = st.text_input("Mois de consommation (format YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
 
 if uploaded_csv is not None:
-    df = pd.read_csv(uploaded_csv)
+    # Lecture CSV avec séparateur français
+    df = pd.read_csv(uploaded_csv, sep=";")
+
+    # Affichage colonnes détectées
+    st.subheader("🗂️ Colonnes détectées dans le fichier CSV")
+    st.write(df.columns.tolist())
 
     # Aperçu des sessions Scenic
-    st.subheader("🔎 Aperçu des sessions Scenic détectées")
-    st.write(df[df["Authentification"] == VEHICULE][["Date/heure de début","Énergie consommée (Wh)"]])
+    if "Authentification" in df.columns:
+        st.subheader("🔎 Aperçu des sessions Scenic détectées")
+        st.write(df[df["Authentification"] == VEHICULE][["Date/heure de début","Énergie consommée (Wh)"]])
 
     if uploaded_annexe is not None:
         if st.button("📄 Générer la facture"):
