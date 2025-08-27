@@ -8,10 +8,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.graphics.shapes import Drawing, Rect, Polygon
-from reportlab.graphics import renderPDF
 from PyPDF2 import PdfMerger
 
-VERSION = "v7.9.1"
+VERSION = "v8.0"
 
 # --- Styles & couleurs (inspiré Alkern) ---
 ALKERN_GREEN = colors.HexColor("#8DC63F")
@@ -19,7 +18,7 @@ ALKERN_GRAY  = colors.HexColor("#4D4D4D")
 LIGHT_GRAY   = colors.HexColor("#f2f2f2")
 
 styles = getSampleStyleSheet()
-TITLE = ParagraphStyle("Title", parent=styles["Title"], textColor=ALKERN_GREEN, fontSize=18, alignment=1)
+TITLE  = ParagraphStyle("Title", parent=styles["Title"], textColor=ALKERN_GREEN, fontSize=18, alignment=1)
 NORMAL = ParagraphStyle("Normal", parent=styles["Normal"], textColor=ALKERN_GRAY, fontSize=10)
 HEADER = ParagraphStyle("Header", parent=styles["Heading2"], textColor=ALKERN_GREEN, fontSize=12, spaceAfter=6)
 CENTER = ParagraphStyle("Center", parent=styles["Normal"], alignment=1, fontSize=11, textColor=ALKERN_GRAY)
@@ -100,6 +99,7 @@ def compute_cost(start, active_seconds, kWh_total):
 # --- Dessin d'arbres (vectoriel, pas d'emoji) ---
 def make_trees_flowable(n: int):
     if n<=0: n=1
+    n = int(min(max(n,1), 30))  # limiter pour rester lisible
     w = 14*n
     h = 18
     d = Drawing(w, h)
@@ -112,7 +112,7 @@ def make_trees_flowable(n: int):
     return d
 
 # --- Génération de la facture PDF ---
-def build_pdf(df, mois_selection, annexe_file=None):
+def build_pdf(df, mois_selection, selected_auth, annexe_file=None):
     # Colonnes
     c_start = find_column(df.columns, "date/heure de debut", "date/heure de début", "start")
     c_end   = find_column(df.columns, "date/heure de fin", "fin", "end")
@@ -135,7 +135,8 @@ def build_pdf(df, mois_selection, annexe_file=None):
 
     # Filtres
     auth_norm = df[c_auth].astype(str).map(normalize_txt)
-    mask_vehicle = auth_norm.str.contains("scenic", na=False)
+    veh_norm = normalize_txt(selected_auth or "")
+    mask_vehicle = auth_norm.str.contains(veh_norm, na=False) if veh_norm else (auth_norm!="")
     dfv = df[mask_vehicle & (df[c_energy]>0) & (df["active_sec"]>0)].copy()
     dfv["YYYY-MM"] = dfv[c_start].dt.strftime("%Y-%m")
     dfv = dfv[dfv["YYYY-MM"]==mois_selection]
@@ -228,8 +229,8 @@ def build_pdf(df, mois_selection, annexe_file=None):
     # Récap
     recap = [["Total énergie consommée", f"{total_kWh:.2f} kWh"],
              ["Total HT", f"{total_HT:.2f} €"],
-             ["TVA (20%)", f"{tva:.2f} €"],
-             ["Total TTC", f"{total_TTC:.2f} €"]]
+             ["TVA (20%)", f"{(total_HT*0.20):.2f} €"],
+             ["Total TTC", f"{(total_HT*1.20):.2f} €"]]
     t_recap = Table(recap, colWidths=[220,120])
     t_recap.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5, colors.black),
                                  ("BACKGROUND",(0,-1),(-1,-1), colors.HexColor("#fff2cc")),
@@ -257,7 +258,7 @@ def build_pdf(df, mois_selection, annexe_file=None):
     elements.append(Paragraph(f"Distance estimée parcourue : {km_estimes:,.0f} km", NORMAL))
     elements.append(Paragraph(f"CO₂ évité : {gain_co2:,.0f} kg", NORMAL))
     elements.append(Spacer(1, 6))
-    elements.append(make_trees_flowable(max(1, min(arbres_eq, 30))))
+    elements.append(make_trees_flowable(arbres_eq))
     elements.append(Paragraph(f"({arbres_eq} arbres équivalents)", CENTER))
 
     doc.build(elements)
@@ -265,7 +266,6 @@ def build_pdf(df, mois_selection, annexe_file=None):
     # Fusion avec annexe si fournie
     final_pdf = pdf_path
     if annexe_file is not None:
-        # écrire annexe sur disque temporaire
         ann_tmp = os.path.join(tmpdir, "annexe.pdf")
         with open(ann_tmp, "wb") as out:
             out.write(annexe_file.read())
@@ -288,17 +288,36 @@ annexe = st.file_uploader("Déclaration de conformité (PDF) — optionnel", typ
 
 if csv_file is not None:
     df = read_csv_safely(csv_file)
-    st.write("Colonnes détectées :", list(df.columns))
-    # Mois dispo
+
+    # Détection des colonnes
+    c_auth = find_column(df.columns, "authentification", "auth")
     c_start_guess = find_column(df.columns, "date/heure de debut", "date/heure de début", "start")
+
+    st.write("Colonnes détectées :", list(df.columns))
+
+    # Sélecteur de véhicule / badge
+    veh_options = []
+    if c_auth:
+        veh_options = sorted(df[c_auth].dropna().astype(str).unique().tolist())
+    selected_auth = st.selectbox("Véhicule / badge à facturer", options=veh_options or ["Tous"], index=(veh_options.index("Scenic") if "Scenic" in veh_options else 0))
+
+    # Mois disponible
     if c_start_guess:
         dates = pd.to_datetime(df[c_start_guess], errors="coerce")
         mois = sorted(dates.dt.strftime("%Y-%m").dropna().unique().tolist())
     else:
         mois = [datetime.now().strftime("%Y-%m")]
     mois_selection = st.selectbox("Mois de consommation", options=mois or [datetime.now().strftime("%Y-%m")])
+
+    # Aperçu
+    if c_auth and c_start_guess:
+        mask = df[c_auth].astype(str).str.contains(selected_auth, na=False) if selected_auth!="Tous" else (df[c_auth].astype(str)!="")
+        df_preview = df.loc[mask, [c_start_guess, find_column(df.columns,"date/heure de fin","fin","end"), find_column(df.columns,"energie","énergie","wh","kwh"), c_auth]].head(20)
+        st.subheader("🔎 Aperçu des sessions filtrées")
+        st.dataframe(df_preview)
+
     if st.button("📄 Générer la facture PDF"):
-        output, err = build_pdf(df, mois_selection, annexe_file=annexe)
+        output, err = build_pdf(df, mois_selection, selected_auth if selected_auth!="Tous" else "", annexe_file=annexe)
         if err:
             st.error("⚠️ " + err)
         else:
