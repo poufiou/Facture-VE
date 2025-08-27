@@ -57,11 +57,20 @@ def compute_cost(start, end, kWh_total):
     cost = kWh_hc * tarifs["HC"] + kWh_hp * tarifs["HP"]
     return kWh_hc, kWh_hp, cost
 
-def generate_facture(df, annexe_file):
+def generate_facture(df, annexe_file, mois_selection):
+    # Conversion des dates
     df["Date/heure de début"] = pd.to_datetime(df["Date/heure de début"])
     df["Date/heure de fin"] = pd.to_datetime(df["Date/heure de fin"])
     df["kWh"] = df["Énergie consommée (Wh)"] / 1000
-    df = df[df["Authentification"] == VEHICULE]
+
+    # Filtre : véhicule Scenic + sessions > 0 Wh
+    df = df[(df["Authentification"] == VEHICULE) & (df["Énergie consommée (Wh)"] > 0)]
+
+    # Filtre sur le mois choisi
+    df = df[df["Date/heure de début"].dt.strftime("%Y-%m") == mois_selection]
+
+    if df.empty:
+        return None  # aucune session
 
     sessions = []
     total_HT = 0
@@ -99,8 +108,9 @@ def generate_facture(df, annexe_file):
     elements.append(Paragraph(FACTURE_CLIENT, styles["Normal"]))
     elements.append(Spacer(1, 24))
 
-    elements.append(Paragraph(f"<b>Facture n°:</b> {datetime.now().strftime('%Y-%m')}-{VEHICULE}<br/>"
+    elements.append(Paragraph(f"<b>Facture n°:</b> {mois_selection}-{VEHICULE}<br/>"
                               f"<b>Date :</b> {datetime.now().strftime('%d/%m/%Y')}<br/>"
+                              f"<b>Période :</b> {mois_selection}<br/>"
                               f"<b>Véhicule :</b> {IMMATRICULATION}", styles["Normal"]))
     elements.append(Spacer(1, 24))
 
@@ -151,6 +161,8 @@ st.title("🔌 Générateur de Factures de Recharge VE")
 uploaded_csv = st.file_uploader("Déposez votre fichier CSV de sessions", type=["csv"])
 uploaded_annexe = st.file_uploader("Déposez la Déclaration de Conformité Enphase (PDF)", type=["pdf"])
 
+mois_selection = st.text_input("Mois de consommation (format YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
+
 if uploaded_csv is not None and uploaded_annexe is not None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_csv:
         tmp_csv.write(uploaded_csv.read())
@@ -161,6 +173,9 @@ if uploaded_csv is not None and uploaded_annexe is not None:
 
     if st.button("📄 Générer la facture"):
         df = pd.read_csv(csv_path)
-        output_pdf = generate_facture(df, annexe_path)
-        with open(output_pdf, "rb") as f:
-            st.download_button("⬇️ Télécharger la facture PDF", f, file_name="facture_complete.pdf")
+        output_pdf = generate_facture(df, annexe_path, mois_selection)
+        if output_pdf is None:
+            st.error("⚠️ Aucune session trouvée pour ce mois et ce véhicule (Scenic).")
+        else:
+            with open(output_pdf, "rb") as f:
+                st.download_button("⬇️ Télécharger la facture PDF", f, file_name=f"facture_{mois_selection}.pdf")
