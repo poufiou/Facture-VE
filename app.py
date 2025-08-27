@@ -163,19 +163,18 @@ uploaded_annexe = st.file_uploader("Déposez la Déclaration de Conformité Enph
 
 mois_selection = st.text_input("Mois de consommation (format YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
 
-if uploaded_csv is not None and uploaded_annexe is not None:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_csv:
-        tmp_csv.write(uploaded_csv.read())
-        csv_path = tmp_csv.name
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-        tmp_pdf.write(uploaded_annexe.read())
-        annexe_path = tmp_pdf.name
+if uploaded_csv is not None:
+    df = pd.read_csv(uploaded_csv)
 
-    if st.button("📄 Générer la facture"):
-        df = pd.read_csv(csv_path)
-        output_pdf = generate_facture(df, annexe_path, mois_selection)
-        if output_pdf is None:
-            st.error("⚠️ Aucune session trouvée pour ce mois et ce véhicule (Scenic).")
-        else:
-            with open(output_pdf, "rb") as f:
-                st.download_button("⬇️ Télécharger la facture PDF", f, file_name=f"facture_{mois_selection}.pdf")
+    # Aperçu des sessions Scenic
+    st.subheader("🔎 Aperçu des sessions Scenic détectées")
+    st.write(df[df["Authentification"] == VEHICULE][["Date/heure de début","Énergie consommée (Wh)"]])
+
+    if uploaded_annexe is not None:
+        if st.button("📄 Générer la facture"):
+            output_pdf = generate_facture(df, uploaded_annexe, mois_selection)
+            if output_pdf is None:
+                st.error("⚠️ Aucune session trouvée pour ce mois et ce véhicule (Scenic).")
+            else:
+                with open(output_pdf, "rb") as f:
+                    st.download_button("⬇️ Télécharger la facture PDF", f, file_name=f"facture_{mois_selection}.pdf")
