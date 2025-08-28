@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import unicodedata, re, io, os, tempfile
@@ -9,9 +10,9 @@ from reportlab.lib import colors
 from reportlab.graphics.shapes import Drawing, Rect, Polygon
 from PyPDF2 import PdfMerger
 
-VERSION = "v8.1"
+VERSION = "v8.2"
 
-# --- Styles & couleurs (inspiré Alkern) ---
+# --- Styles & couleurs ---
 ALKERN_GREEN = colors.HexColor("#8DC63F")
 ALKERN_GRAY  = colors.HexColor("#4D4D4D")
 LIGHT_GRAY   = colors.HexColor("#f2f2f2")
@@ -26,12 +27,12 @@ CENTER = ParagraphStyle("Center", parent=styles["Normal"], alignment=1, fontSize
 def normalize_txt(x: str) -> str:
     if x is None:
         return ""
-    x = str(x).replace("\xa0", " ")
+    x = str(x).replace("\\xa0", " ")
     x = "".join(c for c in unicodedata.normalize("NFKD", x) if not unicodedata.combining(c))
     return x.strip().lower()
 
 def read_csv_safely(uploaded):
-    for sep in [",",";","\t"]:
+    for sep in [",",";","\\t"]:
         try:
             uploaded.seek(0)
             df = pd.read_csv(uploaded, sep=sep, engine="python")
@@ -52,12 +53,21 @@ def find_column(cols, *keywords):
     return None
 
 def parse_temps_actif(s: str) -> int:
-    if pd.isna(s): return 0
-    s = str(s).lower()
+    # Gère '3 hr 12 min 4 sec', '3h12m4s', '3 h 12 min 4 s', '2:15:30', etc.
+    if pd.isna(s):
+        return 0
+    s = str(s).strip().lower()
+    # format HH:MM:SS
+    if re.match(r"^\\d{1,2}:\\d{2}:\\d{2}$", s):
+        h, m, sec = s.split(":")
+        return int(h)*3600 + int(m)*60 + int(sec)
     total = 0
-    hr = re.search(r"(\d+)\s*hr", s)
-    mn = re.search(r"(\d+)\s*min", s)
-    sc = re.search(r"(\d+)\s*sec", s)
+    # heures
+    hr = re.search(r"(\\d+)\\s*(h|hr|hour|heures?)", s)
+    # minutes
+    mn = re.search(r"(\\d+)\\s*(m|min|minutes?)", s)
+    # secondes
+    sc = re.search(r"(\\d+)\\s*(s|sec|seconds?|secondes?)", s)
     if hr: total += int(hr.group(1))*3600
     if mn: total += int(mn.group(1))*60
     if sc: total += int(sc.group(1))
@@ -95,10 +105,10 @@ def compute_cost(start, active_seconds, kWh_total):
     tarifs = get_tarifs(start)
     return kwh_hc, kwh_hp, kwh_hc*tarifs["HC"] + kwh_hp*tarifs["HP"]
 
-# --- Dessin d'arbres (vectoriel, pas d'emoji) ---
+# --- Dessin d'arbres (vectoriel) ---
 def make_trees_flowable(n: int):
     if n<=0: n=1
-    n = int(min(max(n,1), 30))  # limiter pour rester lisible
+    n = int(min(max(n,1), 30))
     w = 14*n
     h = 18
     d = Drawing(w, h)
@@ -122,17 +132,23 @@ def build_pdf(df, mois_selection, selected_auth, annexe_file=None):
     df[c_start]  = pd.to_datetime(df[c_start], errors="coerce")
     df[c_end]    = pd.to_datetime(df[c_end],   errors="coerce")
     df[c_energy] = pd.to_numeric(df[c_energy], errors="coerce")
+
     if c_active:
         df["active_sec"] = df[c_active].apply(parse_temps_actif)
+        # Fallback si parsing retourne 0
+        zero_mask = (df["active_sec"]<=0) & df[c_start].notna() & df[c_end].notna()
+        df.loc[zero_mask, "active_sec"] = (df.loc[zero_mask, c_end]-df.loc[zero_mask, c_start]).dt.total_seconds().astype(int)
     else:
         df["active_sec"] = (df[c_end]-df[c_start]).dt.total_seconds().fillna(0).astype(int)
 
+    # Filtres
     auth_norm = df[c_auth].astype(str).map(normalize_txt)
     veh_norm = normalize_txt(selected_auth or "")
     if veh_norm and veh_norm != "tous":
         mask_vehicle = auth_norm == veh_norm
     else:
         mask_vehicle = auth_norm != ""
+
     dfv = df[mask_vehicle & (df[c_energy]>0) & (df["active_sec"]>0)].copy()
     dfv["YYYY-MM"] = dfv[c_start].dt.strftime("%Y-%m")
     dfv = dfv[dfv["YYYY-MM"]==mois_selection]
@@ -162,12 +178,14 @@ def build_pdf(df, mois_selection, selected_auth, annexe_file=None):
     tva = total_HT*0.20
     total_TTC = total_HT + tva
 
+    # CO2
     km_estimes = total_kWh / 0.165
     co2_diesel = km_estimes*120/1000
     co2_ev     = km_estimes*4.5/1000
     gain_co2   = max(co2_diesel - co2_ev, 0)
     arbres_eq  = int(round(gain_co2/25))
 
+    # Build PDF
     tmpdir = tempfile.mkdtemp()
     pdf_path = os.path.join(tmpdir, f"facture_complete_HD-803-PZ_{mois_selection}.pdf")
     doc = SimpleDocTemplate(pdf_path, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
@@ -191,7 +209,7 @@ def build_pdf(df, mois_selection, selected_auth, annexe_file=None):
         [Paragraph(f"<b>Facture n°:</b> {mois_selection}-HD-803-PZ", NORMAL),
          Paragraph(f"<b>Date :</b> {datetime.now().strftime('%d/%m/%Y')}", NORMAL)],
         [Paragraph(f"<b>Période :</b> {mois_selection}", NORMAL),
-         Paragraph("<b>Véhicule :</b> " + selected_auth, NORMAL)],
+         Paragraph("<b>Véhicule :</b> " + (selected_auth or "Tous"), NORMAL)],
     ]
     t_infos = Table(infos, colWidths=[250,250])
     t_infos.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1), LIGHT_GRAY),
@@ -262,12 +280,19 @@ if csv_file is not None:
 
     c_auth = find_column(df.columns, "authentification", "auth")
     c_start_guess = find_column(df.columns, "date/heure de debut", "date/heure de début", "start")
+    c_end_guess = find_column(df.columns, "date/heure de fin", "fin", "end")
+    c_energy_guess = find_column(df.columns, "energie", "énergie", "wh", "kwh")
+    c_active_guess = find_column(df.columns, "temps de charge active", "active")
 
-    st.write("Colonnes détectées :", list(df.columns))
+    with st.expander("🔧 Diagnostic colonnes détectées"):
+        st.write({
+            "start": c_start_guess, "end": c_end_guess, "energy": c_energy_guess,
+            "auth": c_auth, "active": c_active_guess
+        })
 
     veh_options = []
     if c_auth:
-        veh_options = sorted(set(df[c_auth].dropna().astype(str).map(str.strip).tolist()))
+        veh_options = sorted(set(df[c_auth].dropna().astype(str).map(lambda x: x.strip()).tolist()))
         veh_options = ["Tous"] + veh_options
     selected_auth = st.selectbox("Véhicule / badge à facturer", options=veh_options)
 
@@ -277,6 +302,19 @@ if csv_file is not None:
     else:
         mois = [datetime.now().strftime("%Y-%m")]
     mois_selection = st.selectbox("Mois de consommation", options=mois or [datetime.now().strftime("%Y-%m")])
+
+    # Aperçu des sessions filtrées (compte)
+    if c_auth and c_start_guess and c_energy_guess:
+        auth_norm = df[c_auth].astype(str).map(normalize_txt)
+        sel_norm = normalize_txt(selected_auth or "")
+        if sel_norm and sel_norm != "tous":
+            mask_v = auth_norm == sel_norm
+        else:
+            mask_v = auth_norm != ""
+        # Compte par mois
+        df["_YYYY_MM"] = pd.to_datetime(df[c_start_guess], errors="coerce").dt.strftime("%Y-%m")
+        st.info(f"Sessions pour le véhicule sélectionné : {int(mask_v.sum())} lignes (tous mois confondus).")
+        st.write("Répartition par mois :", df.loc[mask_v, "_YYYY_MM"].value_counts().sort_index())
 
     if st.button("📄 Générer la facture PDF"):
         output, err = build_pdf(df, mois_selection, selected_auth if selected_auth!="Tous" else "", annexe_file=annexe)
