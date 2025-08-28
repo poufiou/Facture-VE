@@ -15,8 +15,27 @@ NORMAL = ParagraphStyle("Normal", parent=styles["Normal"], textColor=colors.HexC
 HEADER = ParagraphStyle("Header", parent=styles["Heading2"], textColor=colors.HexColor("#8DC63F"), fontSize=12, spaceAfter=6)
 
 # ⚡ Fonctions utiles
+def parse_minutes(val):
+    """Convertit '6 hr 26 min' ou '5 min 3 sec' en minutes entières"""
+    if pd.isna(val): 
+        return 0
+    txt = str(val)
+    h, m, s = 0, 0, 0
+    if "hr" in txt:
+        try: h = int(txt.split("hr")[0].strip())
+        except: h = 0
+        txt = txt.split("hr")[-1]
+    if "min" in txt:
+        try: m = int(txt.split("min")[0].strip())
+        except: m = 0
+        txt = txt.split("min")[-1]
+    if "sec" in txt:
+        try: s = int(txt.split("sec")[0].strip())
+        except: s = 0
+    return h*60 + m + (1 if s>0 else 0)
+
 def calcul_hp_hc(start_time, duration_min, energy_kwh):
-    """Répartition simplifiée HP/HC (à améliorer si besoin)"""
+    """Répartition HP/HC selon les créneaux définis"""
     hc_slots = [(0,6*60+6),(15*60+6,17*60+6)]
     end_time = start_time + pd.to_timedelta(f"{duration_min}min")
     minutes = duration_min
@@ -41,6 +60,7 @@ def generate_facture(df, vehicule, mois, certif_file, edf_file):
     doc = SimpleDocTemplate(pdf_path, pagesize=A4, rightMargin=30,leftMargin=30,topMargin=30,bottomMargin=30)
     elements = []
 
+    # Titre
     elements.append(Paragraph("FACTURE DE RECHARGE VEHICULE ELECTRIQUE", TITLE))
     elements.append(Spacer(1, 12))
 
@@ -78,13 +98,14 @@ def generate_facture(df, vehicule, mois, certif_file, edf_file):
         date = row["Date/heure de début"].date()
         debut = row["Date/heure de début"].strftime("%Hh%M")
         fin   = row["Date/heure de fin"].strftime("%Hh%M")
-        duree = str(row["Temps de charge active"])
+        duree_txt = str(row["Temps de charge active"])
+        duree_min = parse_minutes(row["Temps de charge active"])
         kwh   = row["Énergie consommée (Wh)"]/1000
-        hc, hp = calcul_hp_hc(row["Date/heure de début"], row["Temps de charge active"].seconds//60, kwh)
+        hc, hp = calcul_hp_hc(row["Date/heure de début"], duree_min, kwh)
         tarif = tarif_avant if date < datetime(2025,8,1).date() else tarif_apres
         montant = hc*tarif["HC"] + hp*tarif["HP"]
 
-        data.append([date.strftime("%d/%m/%Y"), debut, fin, duree,
+        data.append([date.strftime("%d/%m/%Y"), debut, fin, duree_txt,
                      f"{kwh:.2f}", f"{hc:.2f}", f"{hp:.2f}",
                      f"{tarif['HC']:.4f}", f"{tarif['HP']:.4f}", f"{montant:.2f}"])
         total_kwh += kwh
@@ -158,15 +179,21 @@ st.title("⚡ Facturation des recharges VE")
 uploaded_csv = st.file_uploader("Chargez le fichier CSV", type=["csv"])
 uploaded_certif = st.file_uploader("Chargez le certificat de conformité (PDF)", type=["pdf"])
 uploaded_edf = st.file_uploader("Chargez la facture EDF (PDF)", type=["pdf"])
-mois = st.text_input("Mois de consommation (format YYYY-MM)", datetime.now().strftime("%Y-%m"))
 
 if uploaded_csv:
     df = pd.read_csv(uploaded_csv, sep=",")
     df["Date/heure de début"] = pd.to_datetime(df["Date/heure de début"])
     df["Date/heure de fin"] = pd.to_datetime(df["Date/heure de fin"])
+
+    # Sélecteur véhicule
     vehicules = df["Authentification"].dropna().unique()
     vehicule = st.selectbox("Choisissez le véhicule", vehicules)
 
+    # Sélecteur mois disponible dans le CSV
+    mois_dispos = sorted(df["Date/heure de début"].dt.strftime("%Y-%m").unique())
+    mois = st.selectbox("Choisissez le mois de consommation", mois_dispos)
+
+    # Filtrage
     df_filtre = df[(df["Authentification"]==vehicule) & (df["Date/heure de début"].dt.strftime("%Y-%m")==mois)]
 
     st.write("🔎 Aperçu des sessions filtrées", df_filtre[["Date/heure de début","Énergie consommée (Wh)"]].head())
