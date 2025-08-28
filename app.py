@@ -98,8 +98,10 @@ def generate_facture(df, vehicule, mois, certif_file, edf_file):
         date = row["Date/heure de début"].date()
         debut = row["Date/heure de début"].strftime("%Hh%M")
         fin   = row["Date/heure de fin"].strftime("%Hh%M")
-        duree_txt = str(row["Temps de charge active"])
         duree_min = parse_minutes(row["Temps de charge active"])
+        heures = duree_min // 60
+        minutes = duree_min % 60
+        duree_txt = f"{heures}h{minutes:02d}"
         kwh   = row["Énergie consommée (Wh)"]/1000
         hc, hp = calcul_hp_hc(row["Date/heure de début"], duree_min, kwh)
         tarif = tarif_avant if date < datetime(2025,8,1).date() else tarif_apres
