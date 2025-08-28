@@ -8,7 +8,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.graphics.shapes import Drawing, Rect, Polygon
 
-VERSION = "v8.3"
+VERSION = "v8.4"
 
 # --- Styles & couleurs (ALKERN) ---
 ALKERN_GREEN = colors.HexColor("#8DC63F")
@@ -47,7 +47,6 @@ def find_column(cols, *keywords):
     return None
 
 def parse_temps_actif(s: str) -> int:
-    """Gère '3 hr 12 min 4 sec', '3 h 12 min 4 s', '3h12m4s', '2:15:30' etc."""
     if pd.isna(s): return 0
     s = str(s).strip().lower()
     if re.match(r"^\d{1,2}:\d{2}:\d{2}$", s):
@@ -93,17 +92,17 @@ def compute_cost(start, active_seconds, kWh_total):
     tarifs = get_tarifs(start)
     return kwh_hc, kwh_hp, kwh_hc*tarifs["HC"] + kwh_hp*tarifs["HP"]
 
-# --- Dessin d'arbres (agrandis) ---
+# --- Dessin d'arbres (agrandis & centrés) ---
 def make_trees_flowable(n: int):
     if n<=0: n=1
     n = int(min(max(n,1), 20))
-    w = 24*n
-    h = 36
+    w = 30*n
+    h = 50
     d = Drawing(w, h)
     for i in range(n):
-        x = i*24 + 4
-        d.add(Rect(x+8, 4, 8, 12, strokeColor=ALKERN_GRAY, fillColor=colors.brown))
-        d.add(Polygon(points=[x+12,32, x,16, x+24,16], strokeColor=ALKERN_GREEN, fillColor=ALKERN_GREEN))
+        x = i*30 + 6
+        d.add(Rect(x+10, 6, 10, 18, strokeColor=ALKERN_GRAY, fillColor=colors.brown))
+        d.add(Polygon(points=[x+15,44, x,22, x+30,22], strokeColor=ALKERN_GREEN, fillColor=ALKERN_GREEN))
     return d
 
 # --- Génération de la facture PDF ---
@@ -200,6 +199,7 @@ def build_pdf(df, mois_selection, selected_auth):
     elements.append(t_infos)
     elements.append(Spacer(1, 12))
 
+    # Table sessions
     headers = ["Date","Début","Fin","Durée","kWh total","kWh HC","kWh HP","Tarif HC","Tarif HP","Montant (€)"]
     data = [headers]
     for s in sessions:
@@ -217,11 +217,12 @@ def build_pdf(df, mois_selection, selected_auth):
     elements.append(t)
     elements.append(Spacer(1, 12))
 
+    # Table recap alignée à la même largeur (500 pts)
     recap = [["Total énergie consommée", f"{total_kWh:.2f} kWh"],
              ["Total HT", f"{total_HT:.2f} €"],
              ["TVA (20%)", f"{tva:.2f} €"],
              ["Total TTC", f"{total_TTC:.2f} €"]]
-    t_recap = Table(recap, colWidths=[220,120])
+    t_recap = Table(recap, colWidths=[350,150])
     t_recap.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5, colors.black),
                                  ("BACKGROUND",(0,-1),(-1,-1), colors.HexColor("#fff2cc")),
                                  ("TEXTCOLOR",(0,-1),(-1,-1), colors.HexColor("#b30000")),
@@ -241,11 +242,13 @@ def build_pdf(df, mois_selection, selected_auth):
                               "Conforme aux directives MID, LVD, EMC, RED, RoHS", NORMAL))
     elements.append(Spacer(1, 10))
 
+    # Bloc CO2 plus lisible
     elements.append(Paragraph("🌍 Impact CO₂ évité", HEADER))
     elements.append(Paragraph(f"Distance estimée parcourue : {km_estimes:,.0f} km", NORMAL))
     elements.append(Paragraph(f"CO₂ évité : {gain_co2:,.0f} kg", NORMAL))
-    elements.append(Spacer(1, 6))
+    elements.append(Spacer(1, 8))
     elements.append(make_trees_flowable(arbres_eq))
+    elements.append(Spacer(1, 4))
     elements.append(Paragraph(f"({arbres_eq} arbres équivalents)", CENTER))
 
     doc.build(elements)
