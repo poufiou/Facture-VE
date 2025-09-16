@@ -16,8 +16,7 @@ TITLE  = ParagraphStyle("Title", parent=styles["Title"], textColor=colors.HexCol
 NORMAL = ParagraphStyle("Normal", parent=styles["Normal"], textColor=colors.HexColor("#4D4D4D"), fontSize=10.5)
 HEADER = ParagraphStyle("Header", parent=styles["Heading2"], textColor=colors.HexColor("#8DC63F"), fontSize=12, spaceAfter=6)
 
-# Largeur totale utilisée par tous les tableaux (alignement parfait)
-TOTAL_WIDTH = 520  # points
+TOTAL_WIDTH = 520  # largeur totale (points) pour aligner tous les tableaux
 
 # =========================
 # ⚙️ Paramètres fiscaux & tarifs
@@ -77,7 +76,7 @@ def parse_minutes(val):
     return h*60 + m + (1 if s>0 else 0)
 
 def est_hc(dt):
-    """HC : 00:06–06:06 et 15:06–17:06."""
+    """HC : 00:06–06:06 et 15:06–17:06 (inclusifs)."""
     h, m = dt.hour, dt.minute
     if (h > 0 or (h == 0 and m >= 6)) and (h < 6 or (h == 6 and m <= 6)):
         return True
@@ -85,27 +84,44 @@ def est_hc(dt):
         return True
     return False
 
-def calcul_hp_hc(start_time, duration_min, energy_kwh):
-    """Ventile kWh entre HP/HC minute par minute proportionnellement au temps ACTIF."""
-    if duration_min <= 0 or energy_kwh <= 0:
+def calcul_hp_hc(start_time, end_time, active_minutes, energy_kwh):
+    """
+    Ventile l'énergie totale E sur la fenêtre [start_time, end_time] proportionnellement
+    au nombre de minutes en HC/HP. Robuste si la charge active est morcelée.
+    Renvoie (kWh_HP, kWh_HC).
+    """
+    if energy_kwh <= 0:
         return 0.0, 0.0
-    hc_minutes = hp_minutes = 0
-    current = start_time
-    for _ in range(duration_min):
-        if est_hc(current): hc_minutes += 1
-        else: hp_minutes += 1
-        current += pd.Timedelta(minutes=1)
-    hc_kwh = energy_kwh * (hc_minutes / duration_min)
-    hp_kwh = energy_kwh * (hp_minutes / duration_min)
-    # Retour dans l'ordre demandé pour l'historique : HP puis HC
-    return round(hp_kwh, 2), round(hc_kwh, 2)
+    # minutes totales sur la fenêtre (au moins 1 minute)
+    total_minutes = int(max(1, (end_time - start_time).total_seconds() // 60))
+    t = pd.to_datetime(start_time).floor("min")
+    hc_minutes = 0
+    for _ in range(total_minutes):
+        if est_hc(t):
+            hc_minutes += 1
+        t += pd.Timedelta(minutes=1)
+    hp_minutes = total_minutes - hc_minutes
+    kwh_hc = round(energy_kwh * (hc_minutes / total_minutes), 2)
+    kwh_hp = round(energy_kwh - kwh_hc, 2)  # absorbe l'arrondi
+    return kwh_hp, kwh_hc
 
 def co2_evite_from_kwh(total_kwh: float):
     """Estimation simple : Scenic ~16.5 kWh/100 km ; gain vs diesel ~75 g CO2/km."""
     km = int(round(total_kwh / 0.165))      # km ≈ kWh / 0.165
     co2_kg = int(round(km * 0.075))         # 75 g/km -> 0.075 kg/km
-    arbres = max(1, int(round(co2_kg / 25.0)))  # ~25 kgCO2/an par arbre (ordre de grandeur)
+    arbres = max(1, int(round(co2_kg / 25.0)))  # ~25 kgCO2/an par arbre
     return km, co2_kg, arbres
+
+def safe_wh_to_kwh(val):
+    """Convertit un champ 'Énergie consommée (Wh)' en kWh (float) en tolérant virgules/strings."""
+    if pd.isna(val):
+        return 0.0
+    try:
+        # remplace éventuelle virgule décimale
+        x = float(str(val).replace(",", "."))
+    except:
+        x = 0.0
+    return x / 1000.0
 
 # =========================
 # 🧾 Génération PDF (mise en page alignée)
@@ -159,15 +175,24 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
 
     for _, row in df.iterrows():
         d_deb = row["Date/heure de début"]
-        d_fin = row["Date/heure de fin"]
+        if pd.isna(d_deb):
+            continue
+
+        # Durée effective -> minutes
+        duree_min = parse_minutes(row["Temps de charge active"])
+        # Heure de fin = début + durée effective (IGNORER la colonne fin d'origine)
+        d_fin = d_deb + pd.Timedelta(minutes=int(duree_min))
+
         debut_txt = d_deb.strftime("%Hh%M")
         fin_txt   = d_fin.strftime("%Hh%M")
-        duree_min = parse_minutes(row["Temps de charge active"])
-        h, m = divmod(duree_min, 60)
+        h, m = divmod(int(duree_min), 60)
         duree_txt = f"{h}h{m:02d}"
-        kwh_total = float(row["Énergie consommée (Wh)"] or 0) / 1000.0
 
-        kwh_hp, kwh_hc = calcul_hp_hc(d_deb, duree_min, kwh_total)
+        # Énergie totale de la session (kWh)
+        kwh_total = safe_wh_to_kwh(row["Énergie consommée (Wh)"])
+
+        # Ventilation proportionnelle sur la fenêtre [début -> fin]
+        kwh_hp, kwh_hc = calcul_hp_hc(d_deb, d_fin, duree_min, kwh_total)
 
         rows_hist.append([
             d_deb.strftime("%d/%m/%Y"), debut_txt, fin_txt, duree_txt,
@@ -195,6 +220,7 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
     elements.append(Spacer(1, 12))
 
     # ========= 2) DÉTAIL DE LA FACTURATION =========
+    # Tarifs du mois (on prend la date du 1er enregistrement filtré)
     first_date = df.iloc[0]["Date/heure de début"].date() if not df.empty else DATE_BASCULE
     tarifs_ttc = tarifs_ttc_pour(first_date)
     tarifs_ht  = tarifs_ht_depuis_ttc(tarifs_ttc)
@@ -330,9 +356,9 @@ st.caption(
 
 if uploaded_csv:
     df = pd.read_csv(uploaded_csv)
-    # Conversions dates
+
+    # Conversions dates (on ignore la colonne "fin" d'origine et on la recalculera)
     df["Date/heure de début"] = pd.to_datetime(df["Date/heure de début"], errors="coerce")
-    df["Date/heure de fin"]   = pd.to_datetime(df["Date/heure de fin"],   errors="coerce")
 
     # Sélecteur véhicule
     vehicules = df["Authentification"].dropna().unique().tolist()
@@ -345,15 +371,19 @@ if uploaded_csv:
     mois_dispos = sorted(df["Date/heure de début"].dt.strftime("%Y-%m").dropna().unique())
     mois = st.selectbox("Choisissez le mois de consommation", mois_dispos)
 
-    # Filtrage par véhicule + mois
+    # Filtrage par véhicule + mois + consommation > 0
     df_filtre = df[
         (df["Authentification"] == vehicule) &
         (df["Date/heure de début"].dt.strftime("%Y-%m") == mois) &
-        (df["Énergie consommée (Wh)"].fillna(0) > 0)
+        (pd.to_numeric(df["Énergie consommée (Wh)"].astype(str).str.replace(",", "."), errors="coerce").fillna(0) > 0)
     ].copy()
 
-    st.write("🔎 Aperçu des sessions filtrées",
-             df_filtre[["Date/heure de début","Date/heure de fin","Énergie consommée (Wh)","Temps de charge active"]].head())
+    # Aperçu utile
+    if not df_filtre.empty:
+        apercu = df_filtre[["Date/heure de début","Énergie consommée (Wh)","Temps de charge active"]].copy()
+        st.write("🔎 Aperçu des sessions filtrées", apercu.head())
+    else:
+        st.warning("Aucune session trouvée pour ce véhicule et ce mois.")
 
     if st.button("📄 Générer la facture PDF"):
         if df_filtre.empty:
