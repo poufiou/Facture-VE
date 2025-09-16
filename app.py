@@ -16,7 +16,7 @@ TITLE  = ParagraphStyle("Title", parent=styles["Title"], textColor=colors.HexCol
 NORMAL = ParagraphStyle("Normal", parent=styles["Normal"], textColor=colors.HexColor("#4D4D4D"), fontSize=10.5)
 HEADER = ParagraphStyle("Header", parent=styles["Heading2"], textColor=colors.HexColor("#8DC63F"), fontSize=12, spaceAfter=6)
 
-# Largeur totale utilisée par les tableaux (tous alignés)
+# Largeur totale utilisée par tous les tableaux (alignement parfait)
 TOTAL_WIDTH = 520  # points
 
 # =========================
@@ -100,6 +100,13 @@ def calcul_hp_hc(start_time, duration_min, energy_kwh):
     # Retour dans l'ordre demandé pour l'historique : HP puis HC
     return round(hp_kwh, 2), round(hc_kwh, 2)
 
+def co2_evite_from_kwh(total_kwh: float):
+    """Estimation simple : Scenic ~16.5 kWh/100 km ; gain vs diesel ~75 g CO2/km."""
+    km = int(round(total_kwh / 0.165))      # km ≈ kWh / 0.165
+    co2_kg = int(round(km * 0.075))         # 75 g/km -> 0.075 kg/km
+    arbres = max(1, int(round(co2_kg / 25.0)))  # ~25 kgCO2/an par arbre (ordre de grandeur)
+    return km, co2_kg, arbres
+
 # =========================
 # 🧾 Génération PDF (mise en page alignée)
 # =========================
@@ -115,7 +122,7 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
     elements.append(Paragraph("FACTURE DE RECHARGE VEHICULE ELECTRIQUE", TITLE))
     elements.append(Spacer(1, 10))
 
-    # Émetteur / Client (simple, on garde)
+    # Émetteur / Client
     emetteur = Paragraph("<b>Émetteur :</b><br/>Wesley MARSTON<br/>5 clairière des vernedes<br/>83480 Puget sur Argens", NORMAL)
     client = Paragraph("<b>Facture à :</b><br/>ALKERN France<br/>Rue André Bigotte<br/>Z.I. Parc de la motte au bois<br/>62440 Harnes", NORMAL)
     t_info = Table([[emetteur, client]], colWidths=[260, 260])  # 520
@@ -148,6 +155,7 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
 
     total_hp_kwh = 0.0
     total_hc_kwh = 0.0
+    total_kwh    = 0.0
 
     for _, row in df.iterrows():
         d_deb = row["Date/heure de début"]
@@ -167,9 +175,9 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
         ])
         total_hp_kwh += kwh_hp
         total_hc_kwh += kwh_hc
+        total_kwh    += kwh_total
 
-    # Largeurs (ajustées mais somme = 520)
-    colw_hist = [100, 60, 60, 70, 75, 75, 80]  # 520
+    colw_hist = [100, 60, 60, 70, 75, 75, 80]  # somme 520
     t_hist = Table(rows_hist, repeatRows=1, colWidths=colw_hist)
     t_hist.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,0), colors.HexColor("#8DC63F")),
@@ -177,7 +185,6 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
         ("FONTNAME",(0,0),(-1,0), "Helvetica-Bold"),
         ("GRID",(0,0),(-1,-1),0.5, colors.black),
         ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.whitesmoke, colors.white]),
-        # Alignement titres + contenu
         ("ALIGN",(0,0),(3,-1),"LEFT"),
         ("ALIGN",(4,0),(6,-1),"RIGHT"),
         ("FONTSIZE",(0,0),(-1,0),10.5),
@@ -188,7 +195,6 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
     elements.append(Spacer(1, 12))
 
     # ========= 2) DÉTAIL DE LA FACTURATION =========
-    # Tarifs du mois (on prend la date du 1er enregistrement filtré)
     first_date = df.iloc[0]["Date/heure de début"].date() if not df.empty else DATE_BASCULE
     tarifs_ttc = tarifs_ttc_pour(first_date)
     tarifs_ht  = tarifs_ht_depuis_ttc(tarifs_ttc)
@@ -219,7 +225,7 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
     elements.append(t_detail)
     elements.append(Spacer(1, 10))
 
-    # Totaux
+    # ========= 3) Totaux =========
     total_ht = montant_ht_hc + montant_ht_hp
     tva_amount = total_ht * TVA_RATE
     total_ttc  = total_ht + tva_amount
@@ -237,6 +243,50 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
         ("ALIGN",(1,0),(1,-1),"RIGHT"),
     ]))
     elements.append(t_recap)
+    elements.append(Spacer(1, 12))
+
+    # ========= 4) Conditions tarifaires =========
+    conditions = [
+        [Paragraph("<b>Conditions tarifaires</b>", HEADER)],
+        [Paragraph("Heures creuses : 00h06–06h06 et 15h06–17h06", NORMAL)],
+        [Paragraph("Tarifs fournis TTC (HC/HP). Les montants HT sont calculés avec PU HT = PU TTC / 1,20 ; puis TVA 20 %.", NORMAL)],
+        [Paragraph("Avant 01/08/2025 → HC : 0,1696 €/kWh | HP : 0,2146 €/kWh (TTC)", NORMAL)],
+        [Paragraph("À partir du 01/08/2025 → HC : 0,1635 €/kWh | HP : 0,2081 €/kWh (TTC)", NORMAL)],
+    ]
+    t_conditions = Table(conditions, colWidths=[TOTAL_WIDTH])
+    t_conditions.setStyle(TableStyle([
+        ("GRID",(0,0),(-1,-1),0.5, colors.black),
+    ]))
+    elements.append(t_conditions)
+    elements.append(Spacer(1, 10))
+
+    # ========= 5) Chargeur =========
+    chargeur = [
+        [Paragraph("<b>Chargeur</b>", HEADER)],
+        [Paragraph("Enphase IQ-EVSE-EU-3032", NORMAL)],
+        [Paragraph("Numéro de série : 202451008197", NORMAL)],
+        [Paragraph("Conforme aux directives MID, LVD, EMC, RED, RoHS", NORMAL)],
+    ]
+    t_chargeur = Table(chargeur, colWidths=[TOTAL_WIDTH])
+    t_chargeur.setStyle(TableStyle([
+        ("GRID",(0,0),(-1,-1),0.5, colors.black),
+    ]))
+    elements.append(t_chargeur)
+    elements.append(Spacer(1, 10))
+
+    # ========= 6) Impact CO2 =========
+    km, co2kg, arbres = co2_evite_from_kwh(total_kwh)
+    co2_tab = [
+        [Paragraph("Impact CO<sub>2</sub> évité", HEADER)],
+        [Paragraph(f"Distance estimée parcourue : {km} km", NORMAL)],
+        [Paragraph(f"CO<sub>2</sub> évité : {co2kg} kg", NORMAL)],
+        [Paragraph(f"Arbres équivalents : {arbres}", NORMAL)],
+    ]
+    t_co2 = Table(co2_tab, colWidths=[TOTAL_WIDTH])
+    t_co2.setStyle(TableStyle([
+        ("GRID",(0,0),(-1,-1),0.5, colors.black),
+    ]))
+    elements.append(t_co2)
 
     # Génération du PDF principal
     doc.build(elements)
