@@ -5,7 +5,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from PyPDF2 import PdfMerger
-from datetime import datetime, date
+from datetime import datetime
 import tempfile, os
 
 # =========================
@@ -22,15 +22,37 @@ HEADER = ParagraphStyle("Header", parent=styles["Heading2"], textColor=colors.He
 TVA_RATE = 0.20
 DIV_TVA  = 1.0 + TVA_RATE
 
-TARIFS_TTC_AVANT = {"HC": 0.1696, "HP": 0.2146}  # TTC
-TARIFS_TTC_APRES = {"HC": 0.1635, "HP": 0.2081}  # TTC
+# Tarifs FOURNIS TTC
+TARIFS_TTC_AVANT = {"HC": 0.1696, "HP": 0.2146}  # jusqu'au 31/07/2025 inclus
+TARIFS_TTC_APRES = {"HC": 0.1635, "HP": 0.2081}  # à partir du 01/08/2025
 DATE_BASCULE = pd.Timestamp(2025, 8, 1).date()
+
+# =========================
+# 📁 Persistance locale des annexes (PDF)
+# =========================
+STORAGE_DIR = os.path.join(os.getcwd(), "storage")
+DEFAULT_CERT_PATH = os.path.join(STORAGE_DIR, "default_certificat.pdf")
+DEFAULT_EDF_PATH  = os.path.join(STORAGE_DIR, "default_facture_electricite.pdf")
+
+os.makedirs(STORAGE_DIR, exist_ok=True)
+
+def save_default_pdf(uploaded_file, dest_path):
+    """Sauvegarde un fichier uploadé comme PDF par défaut."""
+    if uploaded_file is None:
+        return False
+    with open(dest_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return True
+
+def load_default_pdf(path):
+    """Retourne un path si le PDF par défaut existe, sinon None."""
+    return path if os.path.exists(path) and os.path.getsize(path) > 0 else None
 
 # =========================
 # 🔧 Utilitaires
 # =========================
 def parse_minutes(val):
-    """Convertit '6 hr 26 min' ou '5 min 3 sec' -> minutes (arrondi à la minute sup si sec>0)."""
+    """'6 hr 26 min' ou '5 min 3 sec' -> minutes (arrondi à la minute sup si sec>0)."""
     if pd.isna(val):
         return 0
     txt = str(val).lower()
@@ -49,7 +71,7 @@ def parse_minutes(val):
     return h*60 + m + (1 if s>0 else 0)
 
 def est_hc(dt):
-    """Heures creuses : 00:06–06:06 et 15:06–17:06."""
+    """HC : 00:06–06:06 et 15:06–17:06."""
     h, m = dt.hour, dt.minute
     if (h > 0 or (h == 0 and m >= 6)) and (h < 6 or (h == 6 and m <= 6)):
         return True
@@ -71,10 +93,10 @@ def calcul_hp_hc(start_time, duration_min, energy_kwh):
     hp_kwh = energy_kwh * (hp_minutes / duration_min)
     return round(hc_kwh, 2), round(hp_kwh, 2)
 
-def tarifs_ttc_pour(date_obj: date):
+def tarifs_ttc_pour(date_obj):
     return TARIFS_TTC_APRES if date_obj >= DATE_BASCULE else TARIFS_TTC_AVANT
 
-def tarifs_ht_depuis_ttc(tarifs_ttc: dict):
+def tarifs_ht_depuis_ttc(tarifs_ttc):
     return {k: v / DIV_TVA for k, v in tarifs_ttc.items()}
 
 def co2_evite_from_kwh(total_kwh: float):
@@ -88,15 +110,15 @@ def co2_evite_from_kwh(total_kwh: float):
 # =========================
 # 🧾 Génération PDF
 # =========================
-def generate_facture(df, vehicule, date_deb: date, date_fin: date, certif_file, edf_file):
+def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
     tmpdir = tempfile.mkdtemp()
-    period_txt = f"{date_deb.strftime('%Y-%m-%d')} au {date_fin.strftime('%Y-%m-%d')}"
-    out_name = f"facture_complete_{vehicule}_{date_deb.isoformat()}_{date_fin.isoformat()}.pdf"
+    out_name = f"facture_complete_{vehicule}_{mois}.pdf"
     pdf_path = os.path.join(tmpdir, out_name)
 
     doc = SimpleDocTemplate(pdf_path, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     elements = []
 
+    # Titre
     elements.append(Paragraph("FACTURE DE RECHARGE VEHICULE ELECTRIQUE", TITLE))
     elements.append(Spacer(1, 12))
 
@@ -114,7 +136,7 @@ def generate_facture(df, vehicule, date_deb: date, date_fin: date, certif_file, 
     infos = [
         [Paragraph(f"<b>Facture n°:</b> {datetime.now().strftime('%Y%m%d')}-{vehicule}", NORMAL),
          Paragraph(f"<b>Date :</b> {datetime.now().strftime('%d/%m/%Y')}", NORMAL)],
-        [Paragraph(f"<b>Période :</b> {period_txt}", NORMAL),
+        [Paragraph(f"<b>Période :</b> {mois}", NORMAL),
          Paragraph(f"<b>Véhicule :</b> {vehicule}", NORMAL)],
     ]
     t_infos = Table(infos, colWidths=[250, 250])
@@ -123,12 +145,11 @@ def generate_facture(df, vehicule, date_deb: date, date_fin: date, certif_file, 
     elements.append(t_infos)
     elements.append(Spacer(1, 12))
 
-    # Tableau des sessions
-    headers = ["Date","Début","Fin","Durée","kWh total","kWh HC","kWh HP",
-               "Tarif HC (TTC)","Tarif HP (TTC)","Montant HT (€)"]
+    # Tableau des sessions (on affiche Tarifs TTC, mais calcul en HT)
+    headers = ["Date","Début","Fin","Durée","kWh total","kWh HC","kWh HP","Tarif HC (TTC)","Tarif HP (TTC)","Montant HT (€)"]
     data = [headers]
     total_kwh = 0.0
-    total_ht = 0.0
+    total_ht  = 0.0
 
     for _, row in df.iterrows():
         d_deb = row["Date/heure de début"]
@@ -138,14 +159,16 @@ def generate_facture(df, vehicule, date_deb: date, date_fin: date, certif_file, 
         debut_txt = d_deb.strftime("%Hh%M")
         fin_txt   = d_fin.strftime("%Hh%M")
 
-        # Durée HhMM
+        # Durée HhMM (sans secondes)
         duree_min = parse_minutes(row["Temps de charge active"])
         h, m = divmod(duree_min, 60)
         duree_txt = f"{h}h{m:02d}"
 
+        # Énergie & ventilation
         kwh_total = float(row["Énergie consommée (Wh)"] or 0) / 1000.0
         kwh_hc, kwh_hp = calcul_hp_hc(d_deb, duree_min, kwh_total)
 
+        # Tarifs TTC -> HT
         tarifs_ttc = tarifs_ttc_pour(d_fact)
         tarifs_ht  = tarifs_ht_depuis_ttc(tarifs_ttc)
 
@@ -188,10 +211,10 @@ def generate_facture(df, vehicule, date_deb: date, date_fin: date, certif_file, 
     elements.append(t_recap)
     elements.append(Spacer(1, 12))
 
-    # Conditions tarifaires (aligné)
+    # Conditions tarifaires
     conditions = [[Paragraph("<b>Conditions tarifaires</b>", HEADER)],
                   [Paragraph("Heures creuses : 00h06 - 06h06 et 15h06 - 17h06", NORMAL)],
-                  [Paragraph("Tarifs fournis TTC. La facture calcule les montants HT = TTC / 1,20.", NORMAL)],
+                  [Paragraph("Tarifs fournis TTC. Les montants HT sont calculés avec (TTC / 1,20).", NORMAL)],
                   [Paragraph("Avant 01/08/2025 → HC : 0,1696 €/kWh | HP : 0,2146 €/kWh (TTC)", NORMAL)],
                   [Paragraph("À partir du 01/08/2025 → HC : 0,1635 €/kWh | HP : 0,2081 €/kWh (TTC)", NORMAL)]]
     t_conditions = Table(conditions, colWidths=[500])
@@ -199,7 +222,7 @@ def generate_facture(df, vehicule, date_deb: date, date_fin: date, certif_file, 
     elements.append(t_conditions)
     elements.append(Spacer(1, 12))
 
-    # Chargeur (aligné)
+    # Chargeur
     chargeur = [[Paragraph("<b>Chargeur</b>", HEADER)],
                 [Paragraph("Enphase IQ-EVSE-EU-3032", NORMAL)],
                 [Paragraph("Numéro de série : 202451008197", NORMAL)],
@@ -209,12 +232,12 @@ def generate_facture(df, vehicule, date_deb: date, date_fin: date, certif_file, 
     elements.append(t_chargeur)
     elements.append(Spacer(1, 12))
 
-    # CO2 (aligné)
+    # CO2 (simple)
     km, co2kg, arbres = co2_evite_from_kwh(total_kwh)
-    co2_tab = [[Paragraph("🌍 Impact CO<sub>2</sub> évité", HEADER)],
+    co2_tab = [[Paragraph("Impact CO<sub>2</sub> évité", HEADER)],
                [Paragraph(f"Distance estimée parcourue : {km} km", NORMAL)],
                [Paragraph(f"CO<sub>2</sub> évité : {co2kg} kg", NORMAL)],
-               [Paragraph("🌳"*min(arbres, 20) + f" ({arbres} arbres équivalents)", NORMAL)]]
+               [Paragraph(f"Arbres équivalents : {arbres}", NORMAL)]]
     t_co2 = Table(co2_tab, colWidths=[500])
     t_co2.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5,colors.black)]))
     elements.append(t_co2)
@@ -224,8 +247,13 @@ def generate_facture(df, vehicule, date_deb: date, date_fin: date, certif_file, 
     # Fusion avec annexes
     merger = PdfMerger()
     merger.append(pdf_path)
-    if certif_file: merger.append(certif_file)
-    if edf_file:    merger.append(edf_file)
+
+    # Annexes : priorité à l'upload courant, sinon défaut persisté
+    if certif_path and os.path.exists(certif_path):
+        merger.append(certif_path)
+    if edf_path and os.path.exists(edf_path):
+        merger.append(edf_path)
+
     final_path = pdf_path.replace(".pdf", "_final.pdf")
     merger.write(final_path); merger.close()
     return final_path
@@ -233,11 +261,27 @@ def generate_facture(df, vehicule, date_deb: date, date_fin: date, certif_file, 
 # =========================
 # 🚀 Interface Streamlit
 # =========================
-st.title("⚡ Facturation des recharges VE — Sélection par période")
+st.title("⚡ Facturation des recharges VE — Sélection par MOIS")
 
 uploaded_csv    = st.file_uploader("Chargez le fichier CSV", type=["csv"])
-uploaded_certif = st.file_uploader("Chargez le certificat de conformité (PDF)", type=["pdf"])
-uploaded_edf    = st.file_uploader("Chargez la facture d’électricité (PDF)", type=["pdf"])
+
+# Chargement / mémorisation des annexes
+st.subheader("Annexes (facultatif)")
+colA, colB = st.columns(2)
+with colA:
+    uploaded_certif = st.file_uploader("Certificat de conformité (PDF)", type=["pdf"], key="cert")
+with colB:
+    uploaded_edf    = st.file_uploader("Facture d’électricité (PDF)", type=["pdf"], key="edf")
+
+memo = st.checkbox("Mémoriser ces fichiers comme défaut", value=False, help="Ils seront réutilisés automatiquement la prochaine fois.")
+# Sauvegarde des défauts si demandé
+if memo:
+    if uploaded_certif: save_default_pdf(uploaded_certif, DEFAULT_CERT_PATH)
+    if uploaded_edf:    save_default_pdf(uploaded_edf, DEFAULT_EDF_PATH)
+
+# Fichiers par défaut (persistés)
+default_cert = load_default_pdf(DEFAULT_CERT_PATH)
+default_edf  = load_default_pdf(DEFAULT_EDF_PATH)
 
 if uploaded_csv:
     df = pd.read_csv(uploaded_csv, sep=",")
@@ -252,36 +296,39 @@ if uploaded_csv:
         st.stop()
     vehicule = st.selectbox("Choisissez le véhicule", vehicules)
 
-    # 📅 Sélecteur de période (deux dates)
-    min_date = df["Date/heure de début"].dropna().min().date()
-    max_date = df["Date/heure de début"].dropna().max().date()
-    col1, col2 = st.columns(2)
-    with col1:
-        date_deb = st.date_input("Date de début", value=min_date, min_value=min_date, max_value=max_date)
-    with col2:
-        date_fin = st.date_input("Date de fin", value=max_date, min_value=min_date, max_value=max_date)
+    # 📅 Sélecteur MOIS (YYYY-MM) disponibles
+    mois_dispos = sorted(df["Date/heure de début"].dt.strftime("%Y-%m").dropna().unique())
+    mois = st.selectbox("Choisissez le mois de consommation", mois_dispos)
 
-    if date_deb > date_fin:
-        st.error("La date de début doit être antérieure ou égale à la date de fin.")
-        st.stop()
-
-    # Filtrage par véhicule + plage de dates (sur la date de début de session)
-    mask = (
+    # Filtrage
+    df_filtre = df[
         (df["Authentification"] == vehicule) &
-        (df["Date/heure de début"].dt.date >= date_deb) &
-        (df["Date/heure de début"].dt.date <= date_fin) &
+        (df["Date/heure de début"].dt.strftime("%Y-%m") == mois) &
         (df["Énergie consommée (Wh)"].fillna(0) > 0)
-    )
-    df_filtre = df.loc[mask].copy()
+    ].copy()
 
     st.write("🔎 Aperçu des sessions filtrées",
              df_filtre[["Date/heure de début","Date/heure de fin","Énergie consommée (Wh)","Temps de charge active"]].head())
 
     if st.button("📄 Générer la facture PDF"):
         if df_filtre.empty:
-            st.error("Aucune session trouvée pour ce véhicule et cette période.")
+            st.error("Aucune session trouvée pour ce véhicule et ce mois.")
         else:
-            output = generate_facture(df_filtre, vehicule, date_deb, date_fin, uploaded_certif, uploaded_edf)
+            # Choix des annexes : upload courant prioritaire, sinon défauts mémorisés
+            cert_path = None
+            edf_path  = None
+            if uploaded_certif:
+                cert_path = os.path.join(tempfile.mkdtemp(), "cert.pdf")
+                with open(cert_path, "wb") as f: f.write(uploaded_certif.getbuffer())
+            elif default_cert:
+                cert_path = default_cert
+
+            if uploaded_edf:
+                edf_path = os.path.join(tempfile.mkdtemp(), "edf.pdf")
+                with open(edf_path, "wb") as f: f.write(uploaded_edf.getbuffer())
+            elif default_edf:
+                edf_path = default_edf
+
+            output = generate_facture(df_filtre, vehicule, mois, cert_path, edf_path)
             with open(output, "rb") as f:
                 st.download_button("⬇️ Télécharger la facture", f, file_name=os.path.basename(output))
-
