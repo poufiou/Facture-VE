@@ -92,7 +92,6 @@ def calcul_hp_hc(start_time, end_time, active_minutes, energy_kwh):
     """
     if energy_kwh <= 0:
         return 0.0, 0.0
-    # minutes totales sur la fenêtre (au moins 1 minute)
     total_minutes = int(max(1, (end_time - start_time).total_seconds() // 60))
     t = pd.to_datetime(start_time).floor("min")
     hc_minutes = 0
@@ -100,7 +99,6 @@ def calcul_hp_hc(start_time, end_time, active_minutes, energy_kwh):
         if est_hc(t):
             hc_minutes += 1
         t += pd.Timedelta(minutes=1)
-    hp_minutes = total_minutes - hc_minutes
     kwh_hc = round(energy_kwh * (hc_minutes / total_minutes), 2)
     kwh_hp = round(energy_kwh - kwh_hc, 2)  # absorbe l'arrondi
     return kwh_hp, kwh_hc
@@ -113,22 +111,24 @@ def co2_evite_from_kwh(total_kwh: float):
     return km, co2_kg, arbres
 
 def safe_wh_to_kwh(val):
-    """Convertit un champ 'Énergie consommée (Wh)' en kWh (float) en tolérant virgules/strings."""
+    """Convertit 'Énergie consommée (Wh)' en kWh float (tolère virgules)."""
     if pd.isna(val):
         return 0.0
     try:
-        # remplace éventuelle virgule décimale
         x = float(str(val).replace(",", "."))
     except:
         x = 0.0
     return x / 1000.0
 
+def month_label(d: pd.Timestamp):
+    return d.strftime("%Y-%m")
+
 # =========================
-# 🧾 Génération PDF (mise en page alignée)
+# 🧾 Génération PDF
 # =========================
-def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
+def generate_facture(df, vehicule, periode_label, certif_path=None, edf_path=None):
     tmpdir = tempfile.mkdtemp()
-    out_name = f"facture_complete_{vehicule}_{mois}.pdf"
+    out_name = f"facture_complete_{vehicule}_{periode_label}.pdf"
     pdf_path = os.path.join(tmpdir, out_name)
 
     doc = SimpleDocTemplate(pdf_path, pagesize=A4, rightMargin=24, leftMargin=24, topMargin=28, bottomMargin=28)
@@ -154,7 +154,7 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
     infos = [
         [Paragraph(f"<b>Facture n°:</b> {datetime.now().strftime('%Y%m%d')}-{vehicule}", NORMAL),
          Paragraph(f"<b>Date :</b> {datetime.now().strftime('%d/%m/%Y')}", NORMAL)],
-        [Paragraph(f"<b>Période :</b> {mois}", NORMAL),
+        [Paragraph(f"<b>Période :</b> {periode_label}", NORMAL),
          Paragraph(f"<b>Véhicule :</b> {vehicule}", NORMAL)],
     ]
     t_infos = Table(infos, colWidths=[260, 260])  # 520
@@ -178,9 +178,7 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
         if pd.isna(d_deb):
             continue
 
-        # Durée effective -> minutes
         duree_min = parse_minutes(row["Temps de charge active"])
-        # Heure de fin = début + durée effective (IGNORER la colonne fin d'origine)
         d_fin = d_deb + pd.Timedelta(minutes=int(duree_min))
 
         debut_txt = d_deb.strftime("%Hh%M")
@@ -188,10 +186,8 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
         h, m = divmod(int(duree_min), 60)
         duree_txt = f"{h}h{m:02d}"
 
-        # Énergie totale de la session (kWh)
         kwh_total = safe_wh_to_kwh(row["Énergie consommée (Wh)"])
 
-        # Ventilation proportionnelle sur la fenêtre [début -> fin]
         kwh_hp, kwh_hc = calcul_hp_hc(d_deb, d_fin, duree_min, kwh_total)
 
         rows_hist.append([
@@ -220,19 +216,41 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
     elements.append(Spacer(1, 12))
 
     # ========= 2) DÉTAIL DE LA FACTURATION =========
-    # Tarifs du mois (on prend la date du 1er enregistrement filtré)
-    first_date = df.iloc[0]["Date/heure de début"].date() if not df.empty else DATE_BASCULE
-    tarifs_ttc = tarifs_ttc_pour(first_date)
-    tarifs_ht  = tarifs_ht_depuis_ttc(tarifs_ttc)
+    # Tarifs du (des) mois : on applique la règle par session (avant/après 01/08/2025) puis on totalise
+    # -> Mais pour l'affichage PU HT, on choisit de montrer les PU HT correspondant au dernier jour de la période.
+    if not df.empty:
+        last_date = df["Date/heure de début"].max().date()
+    else:
+        last_date = DATE_BASCULE
+    pu_ttc_ref   = tarifs_ttc_pour(last_date)
+    pu_ht_ref    = tarifs_ht_depuis_ttc(pu_ttc_ref)
 
-    montant_ht_hc = total_hc_kwh * tarifs_ht["HC"]
-    montant_ht_hp = total_hp_kwh * tarifs_ht["HP"]
+    # Montants en agrégeant par session en respectant la bascule tarifaire
+    montant_ht_hc = 0.0
+    montant_ht_hp = 0.0
+    total_hc_kwh  = 0.0
+    total_hp_kwh  = 0.0
+
+    for _, row in df.iterrows():
+        d_deb = row["Date/heure de début"]
+        if pd.isna(d_deb):
+            continue
+        duree_min = parse_minutes(row["Temps de charge active"])
+        d_fin = d_deb + pd.Timedelta(minutes=int(duree_min))
+        kwh_total = safe_wh_to_kwh(row["Énergie consommée (Wh)"])
+        kwh_hp, kwh_hc = calcul_hp_hc(d_deb, d_fin, duree_min, kwh_total)
+
+        tarifs_ht_session = tarifs_ht_depuis_ttc(tarifs_ttc_pour(d_deb.date()))
+        montant_ht_hc += kwh_hc * tarifs_ht_session["HC"]
+        montant_ht_hp += kwh_hp * tarifs_ht_session["HP"]
+        total_hc_kwh  += kwh_hc
+        total_hp_kwh  += kwh_hp
 
     detail_headers = ["Détail", "Total (kWh)", "PU HT (€/kWh)", "Total HT (€)"]
     rows_detail = [
         detail_headers,
-        ["Heures creuses (HC)", f"{total_hc_kwh:.2f}", f"{tarifs_ht['HC']:.5f}", f"{montant_ht_hc:.2f}"],
-        ["Heures pleines (HP)", f"{total_hp_kwh:.2f}", f"{tarifs_ht['HP']:.5f}", f"{montant_ht_hp:.2f}"],
+        ["Heures creuses (HC)", f"{total_hc_kwh:.2f}", f"{pu_ht_ref['HC']:.5f}", f"{montant_ht_hc:.2f}"],
+        ["Heures pleines (HP)", f"{total_hp_kwh:.2f}", f"{pu_ht_ref['HP']:.5f}", f"{montant_ht_hp:.2f}"],
     ]
     colw_detail = [220, 90, 100, 110]  # 520
     t_detail = Table(rows_detail, repeatRows=1, colWidths=colw_detail)
@@ -280,9 +298,7 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
         [Paragraph("À partir du 01/08/2025 → HC : 0,1635 €/kWh | HP : 0,2081 €/kWh (TTC)", NORMAL)],
     ]
     t_conditions = Table(conditions, colWidths=[TOTAL_WIDTH])
-    t_conditions.setStyle(TableStyle([
-        ("GRID",(0,0),(-1,-1),0.5, colors.black),
-    ]))
+    t_conditions.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5, colors.black)]))
     elements.append(t_conditions)
     elements.append(Spacer(1, 10))
 
@@ -294,9 +310,7 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
         [Paragraph("Conforme aux directives MID, LVD, EMC, RED, RoHS", NORMAL)],
     ]
     t_chargeur = Table(chargeur, colWidths=[TOTAL_WIDTH])
-    t_chargeur.setStyle(TableStyle([
-        ("GRID",(0,0),(-1,-1),0.5, colors.black),
-    ]))
+    t_chargeur.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5, colors.black)]))
     elements.append(t_chargeur)
     elements.append(Spacer(1, 10))
 
@@ -309,9 +323,7 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
         [Paragraph(f"Arbres équivalents : {arbres}", NORMAL)],
     ]
     t_co2 = Table(co2_tab, colWidths=[TOTAL_WIDTH])
-    t_co2.setStyle(TableStyle([
-        ("GRID",(0,0),(-1,-1),0.5, colors.black),
-    ]))
+    t_co2.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5, colors.black)]))
     elements.append(t_co2)
 
     # Génération du PDF principal
@@ -329,9 +341,9 @@ def generate_facture(df, vehicule, mois, certif_path=None, edf_path=None):
     return final_path
 
 # =========================
-# 🚀 Interface Streamlit (sélection par MOIS + mémoire annexes)
+# 🚀 Interface Streamlit (période multi-mois + mémoire annexes)
 # =========================
-st.title("⚡ Facturation des recharges VE — Sélection par MOIS")
+st.title("⚡ Facturation des recharges VE — Sélection par PÉRIODE (mois à mois)")
 
 uploaded_csv = st.file_uploader("Chargez le fichier CSV", type=["csv"])
 
@@ -357,7 +369,7 @@ st.caption(
 if uploaded_csv:
     df = pd.read_csv(uploaded_csv)
 
-    # Conversions dates (on ignore la colonne "fin" d'origine et on la recalculera)
+    # Conversions dates (on recalcule la fin, donc on ne lit pas la colonne fin)
     df["Date/heure de début"] = pd.to_datetime(df["Date/heure de début"], errors="coerce")
 
     # Sélecteur véhicule
@@ -367,27 +379,44 @@ if uploaded_csv:
         st.stop()
     vehicule = st.selectbox("Choisissez le véhicule", vehicules)
 
-    # Sélecteur mois (YYYY-MM)
+    # Liste mois dispo (YYYY-MM)
     mois_dispos = sorted(df["Date/heure de début"].dt.strftime("%Y-%m").dropna().unique())
-    mois = st.selectbox("Choisissez le mois de consommation", mois_dispos)
+    colS, colE = st.columns(2)
+    with colS:
+        mois_deb = st.selectbox("Mois de début", mois_dispos, index=0)
+    with colE:
+        # par défaut, le même mois pour couvrir "août à août"
+        idx_end = mois_dispos.index(mois_deb) if mois_deb in mois_dispos else 0
+        mois_fin = st.selectbox("Mois de fin", mois_dispos, index=idx_end)
 
-    # Filtrage par véhicule + mois + consommation > 0
+    # Bornes inclusives (1er jour du mois_deb -> dernier jour du mois_fin)
+    start = pd.to_datetime(mois_deb + "-01")
+    # end = dernier jour du mois_fin à 23:59:59
+    end_month = pd.to_datetime(mois_fin + "-01")
+    end = (end_month + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
+
+    if start > end:
+        st.error("La période est invalide (mois de début > mois de fin).")
+        st.stop()
+
+    # Filtrage par véhicule + période + conso > 0
     df_filtre = df[
         (df["Authentification"] == vehicule) &
-        (df["Date/heure de début"].dt.strftime("%Y-%m") == mois) &
+        (df["Date/heure de début"] >= start) &
+        (df["Date/heure de début"] <= end) &
         (pd.to_numeric(df["Énergie consommée (Wh)"].astype(str).str.replace(",", "."), errors="coerce").fillna(0) > 0)
     ].copy()
 
-    # Aperçu utile
+    # Aperçu
     if not df_filtre.empty:
         apercu = df_filtre[["Date/heure de début","Énergie consommée (Wh)","Temps de charge active"]].copy()
         st.write("🔎 Aperçu des sessions filtrées", apercu.head())
     else:
-        st.warning("Aucune session trouvée pour ce véhicule et ce mois.")
+        st.warning("Aucune session trouvée pour ce véhicule dans cette période.")
 
     if st.button("📄 Générer la facture PDF"):
         if df_filtre.empty:
-            st.error("Aucune session trouvée pour ce véhicule et ce mois.")
+            st.error("Aucune session trouvée pour cette période.")
         else:
             # Annexes : upload courant prioritaire, sinon défaut mémorisé
             cert_path = None
@@ -404,6 +433,7 @@ if uploaded_csv:
             elif default_edf:
                 edf_path = default_edf
 
-            output = generate_facture(df_filtre, vehicule, mois, cert_path, edf_path)
+            periode_label = f"{mois_deb}_to_{mois_fin}"
+            output = generate_facture(df_filtre, vehicule, periode_label, cert_path, edf_path)
             with open(output, "rb") as f:
                 st.download_button("⬇️ Télécharger la facture", f, file_name=os.path.basename(output))
