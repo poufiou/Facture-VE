@@ -26,7 +26,6 @@ DIV_TVA  = 1.0 + TVA_RATE
 
 # Tarifs FOURNIS TTC (applicables depuis le 01/02/2026)
 TARIFS_TTC = {"HC": 0.1579, "HP": 0.2065}
-ABONNEMENT_TTC = 19.56
 
 def tarifs_ttc_pour(date_obj=None):
     return TARIFS_TTC
@@ -292,7 +291,6 @@ def generate_facture(df, vehicule, periode_label, certif_path=None, edf_path=Non
         [Paragraph("Heures creuses : 00h06–06h06 et 15h06–17h06", NORMAL)],
         [Paragraph("Tarifs appliqués : grille en vigueur depuis le 01/02/2026. Les montants HT sont calculés avec PU HT = PU TTC / 1,20 ; puis TVA 20 %.", NORMAL)],
         [Paragraph("HC : 0,1579 €/kWh | HP : 0,2065 €/kWh (TTC)", NORMAL)],
-        [Paragraph("Abonnement : 19,56 €/mois TTC", NORMAL)],
     ]
     t_conditions = Table(conditions, colWidths=[TOTAL_WIDTH])
     t_conditions.setStyle(
