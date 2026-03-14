@@ -24,13 +24,12 @@ TOTAL_WIDTH = 520  # largeur totale (points) pour aligner tous les tableaux
 TVA_RATE = 0.20
 DIV_TVA  = 1.0 + TVA_RATE
 
-# Tarifs FOURNIS TTC (affichage / référence)
-TARIFS_TTC_AVANT = {"HC": 0.1696, "HP": 0.2146}  # jusqu'au 31/07/2025 inclus
-TARIFS_TTC_APRES = {"HC": 0.1635, "HP": 0.2081}  # à partir du 01/08/2025
-DATE_BASCULE = pd.Timestamp(2025, 8, 1).date()
+# Tarifs FOURNIS TTC (applicables depuis le 01/02/2026)
+TARIFS_TTC = {"HC": 0.1579, "HP": 0.2065}
+ABONNEMENT_TTC = 19.56
 
-def tarifs_ttc_pour(date_obj):
-    return TARIFS_TTC_APRES if date_obj >= DATE_BASCULE else TARIFS_TTC_AVANT
+def tarifs_ttc_pour(date_obj=None):
+    return TARIFS_TTC
 
 def tarifs_ht_depuis_ttc(tarifs_ttc):
     return {k: v / DIV_TVA for k, v in tarifs_ttc.items()}
@@ -218,13 +217,10 @@ def generate_facture(df, vehicule, periode_label, certif_path=None, edf_path=Non
     # ========= 2) DÉTAIL DE LA FACTURATION =========
     # Tarifs du (des) mois : on applique la règle par session (avant/après 01/08/2025) puis on totalise
     # -> Mais pour l'affichage PU HT, on choisit de montrer les PU HT correspondant au dernier jour de la période.
-    if not df.empty:
-        last_date = df["Date/heure de début"].max().date()
-    else:
-        last_date = DATE_BASCULE
-    pu_ttc_ref   = tarifs_ttc_pour(last_date)
-    pu_ht_ref    = tarifs_ht_depuis_ttc(pu_ttc_ref)
-
+    
+    pu_ttc_ref = tarifs_ttc_pour()
+    pu_ht_ref = tarifs_ht_depuis_ttc(pu_ttc_ref)
+    
     # Montants en agrégeant par session en respectant la bascule tarifaire
     montant_ht_hc = 0.0
     montant_ht_hp = 0.0
@@ -290,13 +286,13 @@ def generate_facture(df, vehicule, periode_label, certif_path=None, edf_path=Non
     elements.append(Spacer(1, 12))
 
     # ========= 4) Conditions tarifaires =========
-    conditions = [
-        [Paragraph("<b>Conditions tarifaires</b>", HEADER)],
-        [Paragraph("Heures creuses : 00h06–06h06 et 15h06–17h06", NORMAL)],
-        [Paragraph("Tarifs fournis TTC (HC/HP). Les montants HT sont calculés avec PU HT = PU TTC / 1,20 ; puis TVA 20 %.", NORMAL)],
-        [Paragraph("Avant 01/08/2025 → HC : 0,1696 €/kWh | HP : 0,2146 €/kWh (TTC)", NORMAL)],
-        [Paragraph("À partir du 01/08/2025 → HC : 0,1635 €/kWh | HP : 0,2081 €/kWh (TTC)", NORMAL)],
-    ]
+   conditions = [
+    [Paragraph("<b>Conditions tarifaires</b>", HEADER)],
+    [Paragraph("Heures creuses : 00h06–06h06 et 15h06–17h06", NORMAL)],
+    [Paragraph("Tarifs appliqués : grille en vigueur depuis le 01/02/2026. Les montants HT sont calculés avec PU HT = PU TTC / 1,20 ; puis TVA 20 %.", NORMAL)],
+    [Paragraph("HC : 0,1579 €/kWh | HP : 0,2065 €/kWh (TTC)", NORMAL)],
+    [Paragraph("Abonnement : 19,56 €/mois TTC", NORMAL)],
+]
     t_conditions = Table(conditions, colWidths=[TOTAL_WIDTH])
     t_conditions.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5, colors.black)]))
     elements.append(t_conditions)
