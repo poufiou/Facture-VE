@@ -286,15 +286,20 @@ def generate_facture(df, vehicule, periode_label, certif_path=None, edf_path=Non
     elements.append(Spacer(1, 12))
 
     # ========= 4) Conditions tarifaires =========
-   conditions = [
-    [Paragraph("<b>Conditions tarifaires</b>", HEADER)],
-    [Paragraph("Heures creuses : 00h06–06h06 et 15h06–17h06", NORMAL)],
-    [Paragraph("Tarifs appliqués : grille en vigueur depuis le 01/02/2026. Les montants HT sont calculés avec PU HT = PU TTC / 1,20 ; puis TVA 20 %.", NORMAL)],
-    [Paragraph("HC : 0,1579 €/kWh | HP : 0,2065 €/kWh (TTC)", NORMAL)],
-    [Paragraph("Abonnement : 19,56 €/mois TTC", NORMAL)],
-]
+     
+    conditions = [
+        [Paragraph("<b>Conditions tarifaires</b>", HEADER)],
+        [Paragraph("Heures creuses : 00h06–06h06 et 15h06–17h06", NORMAL)],
+        [Paragraph("Tarifs appliqués : grille en vigueur depuis le 01/02/2026. Les montants HT sont calculés avec PU HT = PU TTC / 1,20 ; puis TVA 20 %.", NORMAL)],
+        [Paragraph("HC : 0,1579 €/kWh | HP : 0,2065 €/kWh (TTC)", NORMAL)],
+        [Paragraph("Abonnement : 19,56 €/mois TTC", NORMAL)],
+    ]
     t_conditions = Table(conditions, colWidths=[TOTAL_WIDTH])
-    t_conditions.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5, colors.black)]))
+    t_conditions.setStyle(
+        TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ])
+    )
     elements.append(t_conditions)
     elements.append(Spacer(1, 10))
 
